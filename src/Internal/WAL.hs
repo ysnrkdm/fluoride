@@ -14,8 +14,8 @@ import Data.Word (Word8)
 import System.Directory (doesFileExist)
 import System.IO (Handle, hFlush)
 
-appendWAL :: Handle -> Word8 -> B.ByteString -> Maybe B.ByteString -> IO ()
-appendWAL h op k mv = do
+append :: Handle -> Word8 -> B.ByteString -> Maybe B.ByteString -> IO ()
+append h op k mv = do
   let bs = runPut $ do
         putWord8 op
         putWord32be (fromIntegral $ B.length k)
@@ -24,8 +24,8 @@ appendWAL h op k mv = do
         maybe (pure ()) putByteString mv
   BL.hPut h bs >> hFlush h
 
-recoverFromWAL :: FilePath -> IO (M.Map B.ByteString (Maybe B.ByteString))
-recoverFromWAL wal = do
+recover :: FilePath -> IO (M.Map B.ByteString (Maybe B.ByteString))
+recover wal = do
   exists <- doesFileExist wal
   if not exists
     then return M.empty

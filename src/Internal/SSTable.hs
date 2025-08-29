@@ -22,8 +22,8 @@ data SSTable = SSTable
   }
   deriving (Show)
 
-writeSSTable :: FilePath -> Int -> [(B.ByteString, B.ByteString)] -> IO SSTable
-writeSSTable dir sid kvsAsc = do
+write :: FilePath -> Int -> [(B.ByteString, B.ByteString)] -> IO SSTable
+write dir sid kvsAsc = do
   let path = dir </> sstName sid
   withBinaryFile path WriteMode $ \h -> do
     -- write entries
@@ -34,10 +34,10 @@ writeSSTable dir sid kvsAsc = do
     B.hPut h $ BL.toStrict $ runPut $ putWord64be (fromIntegral $ length kvsAsc)
     hFlush h
     return ()
-  loadSSTable path
+  load path
 
-loadSSTable :: FilePath -> IO SSTable
-loadSSTable path = do
+load :: FilePath -> IO SSTable
+load path = do
   putStrLn $ "Loading SSTable from " ++ path
   withBinaryFile path ReadMode $ \h -> do
     hSeek h SeekFromEnd (-8)
@@ -64,16 +64,16 @@ loadSSTable path = do
       let newOffset = offset + 8 + klen + vlen
       buildIndex h (n - 1) newOffset ((k, fromIntegral offset) : acc)
 
-lookupSSTables :: [SSTable] -> B.ByteString -> IO (Maybe B.ByteString)
-lookupSSTables [] _ = return Nothing
-lookupSSTables (sst : rest) k = do
-  mv <- lookupSSTable sst k
+lookupChain :: [SSTable] -> B.ByteString -> IO (Maybe B.ByteString)
+lookupChain [] _ = return Nothing
+lookupChain (sst : rest) k = do
+  mv <- lookupOne sst k
   case mv of
     Just v -> pure $ if B.null v then Nothing else Just v
-    Nothing -> lookupSSTables rest k
+    Nothing -> lookupChain rest k
 
-lookupSSTable :: SSTable -> B.ByteString -> IO (Maybe B.ByteString)
-lookupSSTable sstable k = do
+lookupOne :: SSTable -> B.ByteString -> IO (Maybe B.ByteString)
+lookupOne sstable k = do
   putStrLn $ "Looking up key in SSTable: " ++ (show sstable) ++ " for key " ++ (show k)
   let indices = sstableIndex sstable
       mbIdx = binarySearch k indices

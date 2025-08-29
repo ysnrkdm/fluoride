@@ -15,9 +15,9 @@ where
 import qualified Data.ByteString as B
 import Data.List (sortOn)
 import qualified Data.Map.Strict as M
-import Internal.SSTable
+import qualified Internal.SSTable as SSTable
 import Internal.Types (DB (..))
-import Internal.WAL (appendWAL, recoverFromWAL)
+import qualified Internal.WAL as WAL
 import System.Directory (createDirectoryIfMissing, listDirectory)
 import System.FilePath (takeExtension, (</>))
 import System.IO (IOMode (..), SeekMode (..), hClose, hSeek, openFile, withFile)
@@ -33,13 +33,13 @@ openDB dir = do
   names <- listDirectory dir
   let sstFiles = sortOn id [dir </> n | n <- names, "sst-" `elem` [take 4 n], ".dat" == takeExtension n]
   putStrLn $ "Found " ++ show (length sstFiles) ++ " SSTables: " ++ show sstFiles
-  ssts <- reverse <$> mapM loadSSTable sstFiles -- newest first
+  ssts <- reverse <$> mapM SSTable.load sstFiles -- newest first
 
   -- WAL initialization
   putStrLn "Opening WAL..."
   let wal = dir </> "wal.log"
   -- recover WAL
-  mem <- recoverFromWAL wal
+  mem <- WAL.recover wal
   -- WAL open/create
   walH <- openFile wal ReadWriteMode
   hSeek walH SeekFromEnd 0
@@ -62,7 +62,7 @@ closeDB db = do
 
 putKV :: DB -> B.ByteString -> B.ByteString -> IO DB
 putKV db k v = do
-  appendWAL (walH db) 0 k (Just v)
+  WAL.append (walH db) 0 k (Just v)
   let mem' = M.insert k (Just v) (mem db)
       added = 9 + B.length k + B.length v
       db' = db {mem = mem', memBytes = memBytes db + added}
@@ -70,7 +70,7 @@ putKV db k v = do
 
 delKV :: DB -> B.ByteString -> IO DB
 delKV db k = do
-  appendWAL (walH db) 1 k Nothing
+  WAL.append (walH db) 1 k Nothing
   let mem' = M.insert k Nothing (mem db)
       added = 9 + B.length k
   return db {mem = mem', memBytes = memBytes db + added}
@@ -79,14 +79,14 @@ getKV :: DB -> B.ByteString -> IO (Maybe B.ByteString)
 getKV db k = do
   case M.lookup k (mem db) of
     Just mv -> pure mv
-    Nothing -> lookupSSTables (ssts db) k
+    Nothing -> SSTable.lookupChain (ssts db) k
 
 flush :: DB -> IO DB
 flush db
   | M.null (mem db) = return db
   | otherwise = do
       let pairs = [(k, v) | (k, Just v) <- M.toAscList (mem db)]
-      sst <- writeSSTable (rootDir db) (nextId db) pairs
+      sst <- SSTable.write (rootDir db) (nextId db) pairs
       -- rotate WAL (truncating for now)
       hClose (walH db)
       let wal = rootDir db </> "wal.log"
