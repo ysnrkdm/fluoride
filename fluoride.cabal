@@ -25,6 +25,9 @@ source-repository head
 
 library
   exposed-modules:
+    Internal.SSTable
+    Internal.Types
+    Internal.WAL
     Lib
   other-modules:
     Paths_fluoride
