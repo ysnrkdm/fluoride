@@ -8,6 +8,10 @@ main :: IO ()
 main = do
   db <- openDB "testdb"
 
+  putStrLn "== read key1 for the restart =="
+  v0 <- getKV db "key1"
+  putStrLn $ "===> " ++ show v0 -- Expected: Just "val1" (from sst)
+  --
   putStrLn "== put key1 -> val1 =="
   db1 <- putKV db "key1" "val1"
   v0 <- getKV db1 "key1"
