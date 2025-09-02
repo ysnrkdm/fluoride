@@ -12,6 +12,7 @@ main = do
   v0 <- getKV db "key1"
   putStrLn $ "===> " ++ show v0 -- Expected: Just "val1" (from sst)
   --
+  putStrLn ""
   putStrLn "== put key1 -> val1 =="
   db1 <- putKV db "key1" "val1"
   v0 <- getKV db1 "key1"

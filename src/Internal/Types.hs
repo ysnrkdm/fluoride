@@ -3,17 +3,15 @@
 
 module Internal.Types where
 
-import qualified Data.ByteString as B
-import qualified Data.Map.Strict as M
+import Internal.MemTable (MemTable)
 import Internal.SSTable (SSTable)
 import System.IO (Handle)
 
 data DB = DB
   { rootDir :: (FilePath),
     walH :: Handle,
-    mem :: !(M.Map B.ByteString (Maybe B.ByteString)), -- Nothing=tombstone
+    mem :: MemTable,
     ssts :: ![SSTable], -- newest first
     nextId :: !Int,
-    memLimit :: !Int, -- bytes rough limit
-    memBytes :: !Int
+    memLimit :: !Int -- bytes rough limit
   }

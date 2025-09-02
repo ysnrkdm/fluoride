@@ -14,7 +14,7 @@ where
 
 import qualified Data.ByteString as B
 import Data.List (sortOn)
-import qualified Data.Map.Strict as M
+import qualified Internal.MemTable as MemTable
 import qualified Internal.SSTable as SSTable
 import Internal.Types (DB (..))
 import qualified Internal.WAL as WAL
@@ -51,8 +51,7 @@ openDB dir = do
         mem,
         ssts,
         nextId = length ssts + 1,
-        memLimit = 2 * 1024 * 1024,
-        memBytes = 0
+        memLimit = 2 * 1024 * 1024
       }
 
 closeDB :: DB -> IO ()
@@ -63,29 +62,28 @@ closeDB db = do
 putKV :: DB -> B.ByteString -> B.ByteString -> IO DB
 putKV db k v = do
   WAL.append (walH db) 0 k (Just v)
-  let mem' = M.insert k (Just v) (mem db)
-      added = 9 + B.length k + B.length v
-      db' = db {mem = mem', memBytes = memBytes db + added}
-  if memBytes db' >= memLimit db' then flush db' else pure db'
+  let mem' = MemTable.insert k v (mem db)
+      db' = db {mem = mem'}
+  if MemTable.isExceedingSizeBytes mem' (memLimit db') then flush db' else pure db'
 
 delKV :: DB -> B.ByteString -> IO DB
 delKV db k = do
   WAL.append (walH db) 1 k Nothing
-  let mem' = M.insert k Nothing (mem db)
-      added = 9 + B.length k
-  return db {mem = mem', memBytes = memBytes db + added}
+  let mem' = MemTable.delete k (mem db)
+  return db {mem = mem'}
 
 getKV :: DB -> B.ByteString -> IO (Maybe B.ByteString)
 getKV db k = do
-  case M.lookup k (mem db) of
+  case MemTable.lookup k (mem db) of
     Just mv -> pure mv
     Nothing -> SSTable.lookupChain (ssts db) k
 
 flush :: DB -> IO DB
-flush db
-  | M.null (mem db) = return db
-  | otherwise = do
-      let pairs = [(k, v) | (k, Just v) <- M.toAscList (mem db)]
+flush db =
+  if MemTable.isEmpty (mem db)
+    then return db
+    else do
+      let pairs = MemTable.snapshotAsc (mem db)
       sst <- SSTable.write (rootDir db) (nextId db) pairs
       -- rotate WAL (truncating for now)
       hClose (walH db)
@@ -93,4 +91,10 @@ flush db
       withFile wal WriteMode (\_ -> pure ())
       walH' <- openFile wal ReadWriteMode
       hSeek walH' SeekFromEnd 0
-      return db {ssts = sst : ssts db, mem = M.empty, nextId = nextId db + 1, walH = walH', memBytes = 0}
+      return
+        db
+          { ssts = sst : ssts db,
+            mem = MemTable.empty,
+            nextId = nextId db + 1,
+            walH = walH'
+          }

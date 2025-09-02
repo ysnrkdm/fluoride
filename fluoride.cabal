@@ -25,6 +25,7 @@ source-repository head
 
 library
   exposed-modules:
+    Internal.MemTable
     Internal.SSTable
     Internal.Types
     Internal.WAL

@@ -7,12 +7,13 @@ module Internal.SSTable where
 
 import Control.Monad (forM)
 import Data.Binary.Get (getWord32be, getWord64be, runGet)
-import Data.Binary.Put (putByteString, putWord32be, putWord64be, runPut)
+import Data.Binary.Put (putByteString, putWord32be, putWord64be, putWord8, runPut)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
 import Data.Int (Int64)
 import qualified Data.Vector as V
 import Debug.Trace (trace)
+import qualified Internal.MemTable
 import System.FilePath ((</>))
 import System.IO (Handle, IOMode (..), SeekMode (..), hFlush, hSeek, hTell, withBinaryFile)
 
@@ -22,14 +23,14 @@ data SSTable = SSTable
   }
   deriving (Show)
 
-write :: FilePath -> Int -> [(B.ByteString, B.ByteString)] -> IO SSTable
+write :: FilePath -> Int -> [(Internal.MemTable.Op, B.ByteString, Maybe B.ByteString)] -> IO SSTable
 write dir sid kvsAsc = do
   let path = dir </> sstName sid
   withBinaryFile path WriteMode $ \h -> do
     -- write entries
-    _offsets <- forM kvsAsc $ \(k, v) -> do
+    _offsets <- forM kvsAsc $ \(op, k, v) -> do
       off <- hTell h
-      B.hPut h $ BL.toStrict $ encodeEntry k v
+      B.hPut h $ BL.toStrict $ encodeEntry op k v
       return (k, off)
     B.hPut h $ BL.toStrict $ runPut $ putWord64be (fromIntegral $ length kvsAsc)
     hFlush h
@@ -51,6 +52,12 @@ load path = do
     buildIndex :: Handle -> Int -> Int -> [(B.ByteString, Int64)] -> IO [(B.ByteString, Int64)]
     buildIndex _ 0 _ acc = return (reverse acc)
     buildIndex h n offset acc = do
+      -- Read operation
+      opLenBs <- B.hGet h 1
+      let op = case B.unpack opLenBs of
+            [1] -> Internal.MemTable.Put
+            [2] -> Internal.MemTable.Del
+            _ -> error "Invalid operation"
       -- Read key length
       klenBs <- B.hGet h 4
       let klen = fromIntegral $ runGet getWord32be (BL.fromStrict klenBs)
@@ -62,7 +69,10 @@ load path = do
       -- Skip value
       _ <- B.hGet h vlen
       let newOffset = offset + 8 + klen + vlen
-      buildIndex h (n - 1) newOffset ((k, fromIntegral offset) : acc)
+      let off = case op of
+            Internal.MemTable.Put -> fromIntegral offset
+            Internal.MemTable.Del -> -1
+      buildIndex h (n - 1) newOffset ((k, off) : acc)
 
 lookupChain :: [SSTable] -> B.ByteString -> IO (Maybe B.ByteString)
 lookupChain [] _ = return Nothing
@@ -84,6 +94,11 @@ lookupOne sstable k = do
         putStrLn $ "  found at index " ++ show idx ++ " with offset " ++ show offset
         hSeek h AbsoluteSeek $ fromIntegral offset
 
+        opLenBs <- B.hGet h 1
+        let op = case B.unpack opLenBs of
+              [1] -> Internal.MemTable.Put
+              [2] -> Internal.MemTable.Del
+              _ -> error "Invalid operation"
         klenBs <- B.hGet h 4
         let klen = fromIntegral $ runGet getWord32be (BL.fromStrict klenBs)
         vlenBs <- B.hGet h 4
@@ -94,9 +109,9 @@ lookupOne sstable k = do
         if key /= k
           then trace ("key not found (deleted): " ++ show key) $ return Nothing
           else do
-            if vlen == 0
-              then return (Just B.empty) -- tombstone
-              else Just <$> B.hGet h vlen
+            case op of
+              Internal.MemTable.Del -> return (Just B.empty) -- tombstone
+              Internal.MemTable.Put -> Just <$> B.hGet h vlen
     Nothing -> return Nothing
 
 binarySearch :: (Ord a) => a -> V.Vector (a, b) -> Maybe Int
@@ -112,12 +127,22 @@ binarySearch target xs = search 0 (V.length xs - 1)
                 GT -> search (mid + 1) high -- Target is in the upper half
                 EQ -> Just mid -- Target found at 'mid' index
 
-encodeEntry :: B.ByteString -> B.ByteString -> BL.ByteString
-encodeEntry k v = runPut $ do
+encodeEntry :: Internal.MemTable.Op -> B.ByteString -> Maybe B.ByteString -> BL.ByteString
+encodeEntry Internal.MemTable.Put k (Just v) = runPut $ do
+  putWord8 1
   putWord32be (fromIntegral $ B.length k)
   putWord32be (fromIntegral $ B.length v)
   putByteString k
   putByteString v
+encodeEntry Internal.MemTable.Put _ Nothing =
+  error "Put operation requires a value"
+encodeEntry Internal.MemTable.Del _ (Just _) =
+  error "Del operation should not have a value"
+encodeEntry Internal.MemTable.Del k Nothing = runPut $ do
+  putWord8 1
+  putWord32be (fromIntegral $ B.length k)
+  putWord32be 0
+  putByteString k
 
 sstName :: Int -> FilePath
 sstName sid = "sst-" ++ pad sid ++ ".dat"

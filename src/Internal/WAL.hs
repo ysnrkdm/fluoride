@@ -9,8 +9,9 @@ import Data.Binary.Get (getWord32be, runGet)
 import Data.Binary.Put (putByteString, putWord32be, putWord8, runPut)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
-import qualified Data.Map.Strict as M
 import Data.Word (Word8)
+import Internal.MemTable (MemTable)
+import qualified Internal.MemTable as MemTable
 import System.Directory (doesFileExist)
 import System.IO (Handle, hFlush)
 
@@ -24,15 +25,16 @@ append h op k mv = do
         maybe (pure ()) putByteString mv
   BL.hPut h bs >> hFlush h
 
-recover :: FilePath -> IO (M.Map B.ByteString (Maybe B.ByteString))
+recover :: FilePath -> IO MemTable
 recover wal = do
   exists <- doesFileExist wal
   if not exists
-    then return M.empty
+    then return MemTable.empty
     else do
       contents <- B.readFile wal
-      return (go M.empty contents)
+      return (go MemTable.empty contents)
   where
+    go :: MemTable -> B.ByteString -> MemTable
     go m s
       | B.null s = m
       | otherwise =
@@ -42,8 +44,8 @@ recover wal = do
               (k, s4) = B.splitAt (fromIntegral klenBs) s3
               (v, rest) = B.splitAt (fromIntegral vlenBs) s4
               m' = case B.head op of
-                0 -> M.insert k (Just v) m
-                1 -> M.insert k Nothing m
+                0 -> MemTable.insert k v m
+                1 -> MemTable.delete k m
                 _ -> error "corrupted WAL"
            in go m' rest
 
