@@ -88,6 +88,8 @@ test-suite fluoride-test
     directory,
     filepath,
     fluoride,
+    tasty,
+    tasty-hunit,
     transformers,
     vector
   default-language: Haskell2010
