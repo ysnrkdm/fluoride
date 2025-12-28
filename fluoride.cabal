@@ -74,6 +74,9 @@ test-suite fluoride-test
   type: exitcode-stdio-1.0
   main-is: Spec.hs
   other-modules:
+    MemTableSpec
+    SSTableSpec
+    WALSpec
     Paths_fluoride
   autogen-modules:
     Paths_fluoride

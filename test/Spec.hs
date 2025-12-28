@@ -3,11 +3,14 @@
 import Control.Monad.IO.Class (liftIO)
 import Internal.Fs (newMemFs)
 import Lib (closeDB, delKV, flush, getKV, openDB, putKV, runApp)
+import MemTableSpec (memTableTests)
+import SSTableSpec (sstableTests)
 import Test.Tasty (TestTree, defaultMain, testGroup)
 import Test.Tasty.HUnit (testCase, (@?=))
+import WALSpec (walTests)
 
 main :: IO ()
-main = defaultMain $ testGroup "fluoride" [crudWithMemFs]
+main = defaultMain $ testGroup "fluoride" [crudWithMemFs, walTests, sstableTests, memTableTests]
 
 crudWithMemFs :: TestTree
 crudWithMemFs =
