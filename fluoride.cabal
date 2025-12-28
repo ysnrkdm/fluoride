@@ -25,6 +25,7 @@ source-repository head
 
 library
   exposed-modules:
+    Internal.Fs
     Internal.MemTable
     Internal.SSTable
     Internal.Types
@@ -44,6 +45,7 @@ library
     containers,
     directory,
     filepath,
+    transformers,
     vector
   default-language: Haskell2010
 
@@ -64,6 +66,7 @@ executable fluoride-exe
     directory,
     filepath,
     fluoride,
+    transformers,
     vector
   default-language: Haskell2010
 
@@ -85,5 +88,6 @@ test-suite fluoride-test
     directory,
     filepath,
     fluoride,
+    transformers,
     vector
   default-language: Haskell2010

@@ -1,80 +1,82 @@
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards #-}
 -- since this is Internal, expose everything
 {-# OPTIONS_GHC -Wno-missing-export-lists #-}
 
 module Internal.SSTable where
 
 import Control.Monad (forM)
+import Control.Monad.IO.Class (liftIO)
+import Control.Monad.Trans.Reader (ask)
 import Data.Binary.Get (getWord32be, getWord64be, runGet)
 import Data.Binary.Put (putByteString, putWord32be, putWord64be, putWord8, runPut)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
 import Data.Int (Int64)
 import qualified Data.Vector as V
-import Debug.Trace (trace)
+import Internal.Fs (Fs (..), FsHandle)
 import qualified Internal.MemTable
+import Internal.Types (AppM, SSTable (..))
 import System.FilePath ((</>))
-import System.IO (Handle, IOMode (..), SeekMode (..), hFlush, hSeek, hTell, withBinaryFile)
+import System.IO (SeekMode (..))
 
-data SSTable = SSTable
-  { sstablePath :: FilePath,
-    sstableIndex :: V.Vector (B.ByteString, Int64) -- (key, offset-of-entry)
-  }
-  deriving (Show)
-
-write :: FilePath -> Int -> [(Internal.MemTable.Op, B.ByteString, Maybe B.ByteString)] -> IO SSTable
+write :: FilePath -> Int -> [(Internal.MemTable.Op, B.ByteString, Maybe B.ByteString)] -> AppM SSTable
 write dir sid kvsAsc = do
+  Fs {..} <- ask
   let path = dir </> sstName sid
-  withBinaryFile path WriteMode $ \h -> do
+  h <- liftIO $ fsOpenRW path
+  liftIO $ do
     -- write entries
     _offsets <- forM kvsAsc $ \(op, k, v) -> do
-      off <- hTell h
-      B.hPut h $ BL.toStrict $ encodeEntry op k v
+      off <- fsTell h
+      fsWrite h $ BL.toStrict $ encodeEntry op k v
       return (k, off)
-    B.hPut h $ BL.toStrict $ runPut $ putWord64be (fromIntegral $ length kvsAsc)
-    hFlush h
-    return ()
+    fsWrite h $ BL.toStrict $ runPut $ putWord64be (fromIntegral $ length kvsAsc)
+    fsFlush h
+    fsClose h
   load path
 
-load :: FilePath -> IO SSTable
+load :: FilePath -> AppM SSTable
 load path = do
-  putStrLn $ "Loading SSTable from " ++ path
-  withBinaryFile path ReadMode $ \h -> do
-    hSeek h SeekFromEnd (-8)
-    count <- runGet getWord64be <$> BL.hGet h 8
-    putStrLn $ "  contains " ++ show count ++ " entries"
-    -- Scanning entries
-    hSeek h AbsoluteSeek 0
-    idx <- buildIndex h (fromIntegral count) 0 []
-    return SSTable {sstablePath = path, sstableIndex = V.fromList idx}
+  Fs {..} <- ask
+  liftIO $ putStrLn $ "Loading SSTable from " ++ path
+  h <- liftIO $ fsOpenRO path
+  liftIO $ fsSeek h SeekFromEnd (-8)
+  countBs <- liftIO $ fsRead h 8
+  let count = runGet getWord64be (BL.fromStrict countBs)
+  liftIO $ putStrLn $ "  contains " ++ show count ++ " entries"
+  liftIO $ fsSeek h AbsoluteSeek 0
+  idx <- liftIO $ buildIndex fsRead h (fromIntegral count) 0 []
+  liftIO $ fsClose h
+  return SSTable {sstablePath = path, sstableIndex = V.fromList idx}
   where
-    buildIndex :: Handle -> Int -> Int -> [(B.ByteString, Int64)] -> IO [(B.ByteString, Int64)]
-    buildIndex _ 0 _ acc = return (reverse acc)
-    buildIndex h n offset acc = do
+    buildIndex :: (FsHandle -> Int -> IO B.ByteString) -> FsHandle -> Int -> Integer -> [(B.ByteString, Int64)] -> IO [(B.ByteString, Int64)]
+    buildIndex _ _ 0 _ acc = return (reverse acc)
+    buildIndex reader h n offset acc = do
       -- Read operation
-      opLenBs <- B.hGet h 1
+      opLenBs <- reader h 1
       let op = case B.unpack opLenBs of
             [1] -> Internal.MemTable.Put
             [2] -> Internal.MemTable.Del
             _ -> error "Invalid operation"
       -- Read key length
-      klenBs <- B.hGet h 4
+      klenBs <- reader h 4
       let klen = fromIntegral $ runGet getWord32be (BL.fromStrict klenBs)
       -- Read value length
-      vlenBs <- B.hGet h 4
+      vlenBs <- reader h 4
       let vlen = fromIntegral $ runGet getWord32be (BL.fromStrict vlenBs)
       -- Read key
-      k <- B.hGet h klen
+      k <- reader h klen
       -- Skip value
-      _ <- B.hGet h vlen
-      let newOffset = offset + 8 + klen + vlen
+      _ <- reader h vlen
+      let newOffset = (fromIntegral offset) + 8 + klen + vlen
       let off = case op of
             Internal.MemTable.Put -> fromIntegral offset
             Internal.MemTable.Del -> -1
-      buildIndex h (n - 1) newOffset ((k, off) : acc)
+      buildIndex reader h (n - 1) (fromIntegral newOffset) ((k, off) : acc)
 
-lookupChain :: [SSTable] -> B.ByteString -> IO (Maybe B.ByteString)
+lookupChain :: [SSTable] -> B.ByteString -> AppM (Maybe B.ByteString)
 lookupChain [] _ = return Nothing
 lookupChain (sst : rest) k = do
   mv <- lookupOne sst k
@@ -82,36 +84,38 @@ lookupChain (sst : rest) k = do
     Just v -> pure $ if B.null v then Nothing else Just v
     Nothing -> lookupChain rest k
 
-lookupOne :: SSTable -> B.ByteString -> IO (Maybe B.ByteString)
+lookupOne :: SSTable -> B.ByteString -> AppM (Maybe B.ByteString)
 lookupOne sstable k = do
-  putStrLn $ "Looking up key in SSTable: " ++ (show sstable) ++ " for key " ++ (show k)
+  Fs {..} <- ask
+  liftIO $ putStrLn $ "Looking up key in SSTable: " ++ show sstable ++ " for key " ++ show k
   let indices = sstableIndex sstable
       mbIdx = binarySearch k indices
   case mbIdx of
     Just idx -> do
       let (_, offset) = indices V.! idx
-      withBinaryFile (sstablePath sstable) ReadMode $ \h -> do
-        putStrLn $ "  found at index " ++ show idx ++ " with offset " ++ show offset
-        hSeek h AbsoluteSeek $ fromIntegral offset
+      h <- liftIO $ fsOpenRO (sstablePath sstable)
+      liftIO $ putStrLn $ "  found at index " ++ show idx ++ " with offset " ++ show offset
+      liftIO $ fsSeek h AbsoluteSeek $ fromIntegral offset
 
-        opLenBs <- B.hGet h 1
-        let op = case B.unpack opLenBs of
-              [1] -> Internal.MemTable.Put
-              [2] -> Internal.MemTable.Del
-              _ -> error "Invalid operation"
-        klenBs <- B.hGet h 4
-        let klen = fromIntegral $ runGet getWord32be (BL.fromStrict klenBs)
-        vlenBs <- B.hGet h 4
-        let vlen = fromIntegral $ runGet getWord32be (BL.fromStrict vlenBs)
+      opLenBs <- liftIO $ fsRead h 1
+      let op = case B.unpack opLenBs of
+            [1] -> Internal.MemTable.Put
+            [2] -> Internal.MemTable.Del
+            _ -> error "Invalid operation"
+      klenBs <- liftIO $ fsRead h 4
+      let klen = fromIntegral $ runGet getWord32be (BL.fromStrict klenBs)
+      vlenBs <- liftIO $ fsRead h 4
+      let vlen = fromIntegral $ runGet getWord32be (BL.fromStrict vlenBs)
 
-        key <- B.hGet h klen
-        -- Check if the key matches
+      key <- liftIO $ fsRead h klen
+      mv <-
         if key /= k
-          then trace ("key not found (deleted): " ++ show key) $ return Nothing
-          else do
-            case op of
-              Internal.MemTable.Del -> return (Just B.empty) -- tombstone
-              Internal.MemTable.Put -> Just <$> B.hGet h vlen
+          then return Nothing
+          else case op of
+            Internal.MemTable.Del -> return (Just B.empty) -- tombstone
+            Internal.MemTable.Put -> Just <$> liftIO (fsRead h vlen)
+      liftIO $ fsClose h
+      return mv
     Nothing -> return Nothing
 
 binarySearch :: (Ord a) => a -> V.Vector (a, b) -> Maybe Int
