@@ -120,7 +120,7 @@ memRead MemHandle {..} n = do
   pos <- readIORef mhPos
   files <- readIORef (mfFiles mhFs)
   let content = Map.findWithDefault B.empty mhPath files
-      start = fromInteger pos
+      start = pos
       slice = B.take n $ B.drop (fromIntegral start) content
   writeIORef mhPos (pos + fromIntegral (B.length slice))
   pure slice

@@ -16,8 +16,8 @@ main = runApp ioFs $ do
   logInfo ""
   logInfo "== put key1 -> val1 =="
   db1 <- putKV db "key1" "val1"
-  v0 <- getKV db1 "key1"
-  logInfo $ "===> " ++ show v0 -- Expected: Just "val1" (from memtable)
+  v0' <- getKV db1 "key1"
+  logInfo $ "===> " ++ show v0' -- Expected: Just "val1" (from memtable)
   --
   logInfo ""
   logInfo "== flush =="
