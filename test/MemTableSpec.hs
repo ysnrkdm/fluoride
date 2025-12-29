@@ -25,5 +25,9 @@ memTableTests =
             size = sizeBytes mt
         size > 0 @?= True
         isExceedingSizeBytes mt (size - 1) @?= True
-        isExceedingSizeBytes mt size @?= False
+        isExceedingSizeBytes mt size @?= False,
+      testCase "delete increases bytes (monotonic usage accounting)" $ do
+        let mt1 = insert "k1" "v1" empty
+            mt2 = delete "k1" mt1
+        sizeBytes mt2 >= sizeBytes mt1 @?= True
     ]

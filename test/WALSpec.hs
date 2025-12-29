@@ -1,10 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
 
 module WALSpec (walTests) where
 
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Reader (ask, runReaderT)
+import Control.Exception (SomeException, evaluate, try)
 import Internal.Fs (Fs (..), newMemFs)
 import qualified Internal.MemTable as MemTable
 import qualified Internal.WAL as WAL
@@ -49,5 +52,34 @@ walTests =
           fs
         mem <- runReaderT (WAL.recover walPath) fs
         MemTable.lookup "k1" mem @?= Just (Just "v1-updated")
-        MemTable.lookup "k2" mem @?= Just Nothing
+        MemTable.lookup "k2" mem @?= Just Nothing,
+      testCase "recover empty WAL file" $ do
+        fs <- newMemFs
+        let walPath = "empty-wal.log"
+        runReaderT
+          ( do
+              Fs {..} <- ask
+              h <- liftIO $ fsOpenRW walPath
+              liftIO $ fsClose h
+          )
+          fs
+        mem <- runReaderT (WAL.recover walPath) fs
+        MemTable.isEmpty mem @?= True,
+      testCase "recover on truncated WAL yields empty or fails gracefully" $ do
+        fs <- newMemFs
+        let walPath = "truncated.log"
+        -- write incomplete record (just op byte without lengths/body)
+        runReaderT
+          ( do
+              Fs {..} <- ask
+              h <- liftIO $ fsOpenRW walPath
+              -- op byte only, missing lengths
+              liftIO $ fsWrite h "\0"
+              liftIO $ fsClose h
+          )
+          fs
+        res <- (try @SomeException) $ runReaderT (WAL.recover walPath >>= liftIO . evaluate) fs
+        case res of
+          Left _ -> pure ()
+          Right mem -> MemTable.isEmpty mem @?= True
     ]
