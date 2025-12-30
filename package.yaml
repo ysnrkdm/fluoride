@@ -28,6 +28,7 @@ dependencies:
   - filepath
   - binary
   - transformers
+  - unix
 
 ghc-options:
   - -Wall

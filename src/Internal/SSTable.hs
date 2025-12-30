@@ -34,6 +34,7 @@ write dir sid kvsAsc = do
       return (k, off)
     fsWrite h $ BL.toStrict $ runPut $ putWord64be (fromIntegral $ length kvsAsc)
     fsFlush h
+    fsSync h
     fsClose h
   load path
 

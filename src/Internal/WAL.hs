@@ -28,7 +28,7 @@ append h op k mv = do
           putWord32be (fromIntegral $ maybe 0 B.length mv)
           putByteString k
           maybe (pure ()) putByteString mv
-  liftIO $ fsWrite h bs >> fsFlush h
+  liftIO $ fsWrite h bs >> fsSync h
 
 recover :: FilePath -> AppM MemTable
 recover wal = do

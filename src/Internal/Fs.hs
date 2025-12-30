@@ -12,7 +12,11 @@ import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
 import qualified Data.Map.Strict as Map
 import System.Directory (createDirectoryIfMissing, doesFileExist, listDirectory)
 import System.FilePath (takeDirectory, takeFileName)
-import System.IO (Handle, IOMode (ReadMode, ReadWriteMode, WriteMode), SeekMode (..), hClose, hFlush, hSeek, hTell, openFile, withFile)
+import System.IO (Handle, IOMode (WriteMode), SeekMode (..), hClose, hFlush, hSeek, hTell, withFile)
+import Foreign.C.Error (throwErrnoIfMinus1_)
+import Foreign.C.Types (CInt (..))
+import System.Posix.IO (OpenMode (..), OpenFileFlags (..), defaultFileFlags, fdToHandle, openFd)
+import System.Posix.Types (Fd (..))
 
 data Fs = Fs
   { fsOpenRO :: FilePath -> IO FsHandle,
@@ -23,6 +27,7 @@ data Fs = Fs
     fsSeek :: FsHandle -> SeekMode -> Integer -> IO (),
     fsTell :: FsHandle -> IO Integer,
     fsFlush :: FsHandle -> IO (),
+    fsSync :: FsHandle -> IO (),
     fsListDir :: FilePath -> IO [FilePath],
     fsEnsureDir :: FilePath -> IO (),
     fsExists :: FilePath -> IO Bool,
@@ -31,8 +36,10 @@ data Fs = Fs
   }
 
 data FsHandle
-  = FsHandleIO Handle
+  = FsHandleIO Handle Fd
   | FsHandleMem MemHandle
+
+foreign import ccall unsafe "fsync" c_fsync :: CInt -> IO CInt
 
 data MemHandle = MemHandle
   { mhPath :: FilePath,
@@ -47,25 +54,28 @@ data MemFs = MemFs
 ioFs :: Fs
 ioFs =
   Fs
-    { fsOpenRO = fmap FsHandleIO . openFileRead,
-      fsOpenRW = fmap FsHandleIO . openFileReadWrite,
+    { fsOpenRO = openFileRead,
+      fsOpenRW = openFileReadWrite,
       fsClose = \case
-        FsHandleIO h -> hClose h
+        FsHandleIO h _ -> hClose h
         FsHandleMem _ -> pure (),
       fsRead = \case
-        FsHandleIO h -> \n -> B.hGet h n
+        FsHandleIO h _ -> \n -> B.hGet h n
         FsHandleMem mh -> memRead mh,
       fsWrite = \case
-        FsHandleIO h -> \bs -> B.hPut h bs
+        FsHandleIO h _ -> \bs -> B.hPut h bs
         FsHandleMem mh -> memWrite mh,
       fsSeek = \case
-        FsHandleIO h -> hSeek h
+        FsHandleIO h _ -> hSeek h
         FsHandleMem mh -> memSeek mh,
       fsTell = \case
-        FsHandleIO h -> hTell h
+        FsHandleIO h _ -> hTell h
         FsHandleMem mh -> memTell mh,
       fsFlush = \case
-        FsHandleIO h -> hFlush h
+        FsHandleIO h _ -> hFlush h
+        FsHandleMem _ -> pure (),
+      fsSync = \case
+        FsHandleIO h (Fd fd) -> hFlush h >> throwErrnoIfMinus1_ "fsync" (c_fsync fd)
         FsHandleMem _ -> pure (),
       fsListDir = listDirectory,
       fsEnsureDir = \p -> createDirectoryIfMissing True p,
@@ -74,8 +84,14 @@ ioFs =
       fsReadAll = B.readFile
     }
   where
-    openFileRead p = openFile p ReadMode
-    openFileReadWrite p = openFile p ReadWriteMode
+    openFileRead p = do
+      fd <- openFd p ReadOnly defaultFileFlags
+      h <- fdToHandle fd
+      pure (FsHandleIO h fd)
+    openFileReadWrite p = do
+      fd <- openFd p ReadWrite defaultFileFlags {creat = Just 0o644}
+      h <- fdToHandle fd
+      pure (FsHandleIO h fd)
 
 newMemFs :: IO Fs
 newMemFs = do
@@ -91,6 +107,7 @@ newMemFs = do
         fsSeek = memOnly "fsSeek" memSeek,
         fsTell = memOnly "fsTell" memTell,
         fsFlush = memOnly "fsFlush" (const $ pure ()),
+        fsSync = memOnly "fsSync" (const $ pure ()),
         fsListDir = memListDir memFs,
         fsEnsureDir = const (pure ()),
         fsExists = memExists memFs,
@@ -101,7 +118,7 @@ newMemFs = do
     memOnly :: String -> (MemHandle -> r) -> FsHandle -> r
     memOnly label f = \case
       FsHandleMem mh -> f mh
-      FsHandleIO _ -> error $ label ++ ": FsHandleIO in mem fs"
+      FsHandleIO _ _ -> error $ label ++ ": FsHandleIO in mem fs"
 
 memOpenRO :: MemFs -> FilePath -> IO FsHandle
 memOpenRO fs path = do
